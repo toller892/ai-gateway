@@ -33,10 +33,9 @@ type ProviderConfig struct {
 	Models  []string `yaml:"models"`
 }
 
-// AliasConfig allows model aliasing
+// AliasConfig allows model aliasing - only model name, provider inferred
 type AliasConfig struct {
-	Provider string `yaml:"provider"`
-	Model    string `yaml:"model"`
+	Model string `yaml:"model"`
 }
 
 // ModelMap maps model name -> provider info
@@ -111,7 +110,7 @@ func Load(path string) error {
 
 // ResolveModel resolves either an alias or direct model name to routing info
 func ResolveModel(model string) (ResolvedModel, bool) {
-	// Check alias first
+	// Check alias first - simplified: alias only contains model name
 	if alias, ok := GlobalConfig.Aliases[model]; ok {
 		// Find the underlying model's provider info
 		info, ok := modelMap[alias.Model]
@@ -119,16 +118,8 @@ func ResolveModel(model string) (ResolvedModel, bool) {
 			return ResolvedModel{}, false
 		}
 
-		// Determine provider type
+		// Provider type inherited from the real model's provider
 		providerType := providerTypeFromName(info.ProviderName)
-		// Allow alias to override provider type
-		if alias.Provider != "" {
-			if cfg, ok := GlobalConfig.Providers[alias.Provider]; ok && cfg.Type != "" {
-				providerType = cfg.Type
-			} else {
-				providerType = providerTypeFromName(alias.Provider)
-			}
-		}
 
 		return ResolvedModel{
 			RequestedModel: model,

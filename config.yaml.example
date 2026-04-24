@@ -6,15 +6,15 @@ server:
   # 入站鉴权 Token 列表（Bearer 验证）
   # 为空则关闭鉴权（仅本地开发）
   auth_tokens:
-    - "sk-gateway-local"
+    - "***"
   
   # 请求限制（默认 10MB）
   max_body_size: 10485760
   
   # 超时设置（秒）
   timeouts:
-    connect: 10    # 连接上游超时
-    request: 300   # 非流式请求总超时
+    connect: 10   # 连接上游超时
+    request: 300  # 非流式请求总超时
 
 # Provider 配置（每个 provider 必须指定 type: openai | anthropic）
 providers:
@@ -52,11 +52,7 @@ providers:
     models:
       - "glm-5.1"
 
-# 模型别名（下游 Agent 可用"fast"代替长模型名）
+# 模型别名（简化为仅映射模型名）
 aliases:
-  fast:
-    provider: openai
-    model: gpt-4o-mini
-  strong:
-    provider: anthropic
-    model: claude-sonnet-4-5
+  fast: gpt-4o-mini      # 等价于 model: gpt-4o-mini
+  strong: claude-sonnet-4-5

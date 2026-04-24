@@ -116,8 +116,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	log.Printf("[%s] %s", r.Method, path)
 
-	// Auth check for API routes (skip health and web UI)
-	if path != "/health" && !strings.HasPrefix(path, "/web") {
+	// Auth check for API routes
+	// Public: /health, /web (static files), /web/ (index)
+	// Protected: /v1/*, /web-api/*
+	isPublic := path == "/health" || path == "/web" || path == "/web/" ||
+		(strings.HasPrefix(path, "/web/") && !strings.HasPrefix(path, "/web-api/"))
+	if !isPublic {
 		if !checkAuth(r) {
 			w.Header().Set("WWW-Authenticate", `Bearer`)
 			writeOpenAIError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid authorization")
