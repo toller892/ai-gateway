@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"ai-gateway/internal/config"
 	"ai-gateway/internal/provider"
@@ -18,23 +19,64 @@ import (
 //go:embed web
 var webFS embed.FS
 
-// Shared HTTP client with connection pooling, HTTP/1.1 only
-// TLSNextProto set to nil disables HTTP/2
-var httpClient = &http.Client{
-	Transport: &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90,
-		TLSClientConfig:     &tls.Config{MaxVersion: tls.VersionTLS12},
-	},
+// Request limiter based on server config
+func maxBodySize() int64 {
+	size := config.GlobalConfig.Server.MaxBodySize
+	if size == 0 {
+		return 10 * 1024 * 1024 // default 10MB
+	}
+	return size
+}
+
+// checkAuth validates Authorization header against server.auth_tokens
+func checkAuth(r *http.Request) bool {
+	tokens := config.GlobalConfig.Server.AuthTokens
+	if len(tokens) == 0 {
+		return true // auth disabled
+	}
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return false
+	}
+	token := strings.TrimPrefix(auth, "Bearer ")
+	for _, t := range tokens {
+		if t == token {
+			return true
+		}
+	}
+	return false
+}
+
+// newHTTPClient creates a configured HTTP client with timeouts
+func newHTTPClient() *http.Client {
+	timeouts := config.GlobalConfig.Server.Timeouts
+	if timeouts.Connect == 0 {
+		timeouts.Connect = 10
+	}
+	if timeouts.Request == 0 {
+		timeouts.Request = 300
+	}
+	return &http.Client{
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     time.Duration(timeouts.Connect) * time.Second,
+			TLSClientConfig:     &tls.Config{MaxVersion: tls.VersionTLS12},
+		},
+		Timeout: time.Duration(timeouts.Request) * time.Second,
+	}
 }
 
 // Handler proxies OpenAI-compatible requests to upstream providers
-type Handler struct{}
+type Handler struct {
+	httpClient *http.Client
+}
 
 // NewHandler creates a new proxy handler
 func NewHandler() *Handler {
-	return &Handler{}
+	return &Handler{
+		httpClient: newHTTPClient(),
+	}
 }
 
 // ServeHTTP handles all incoming requests
@@ -45,8 +87,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// Set max body size for all routes
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodySize())
+
 	path := r.URL.Path
 	log.Printf("[%s] %s", r.Method, path)
+
+	// Auth check for API routes (skip health and web UI)
+	if path != "/health" && !strings.HasPrefix(path, "/web") {
+		if !checkAuth(r) {
+			w.Header().Set("WWW-Authenticate", `Bearer`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
 
 	// Web UI + web API routes
 	if strings.HasPrefix(path, "/web") {
@@ -103,21 +157,18 @@ func (h *Handler) handleWeb(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveWebFile serves files from the embedded webFS
-// strips "/web" prefix and looks up files under "web/" in the FS
 func (h *Handler) serveWebFile(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
-	// Strip "/web" prefix. "/web/foo" → "web/foo", "/web/" → "web/index.html"
 	if p == "/web" || p == "/web/" {
 		p = "web/index.html"
 	} else if len(p) > 5 {
-		p = "web" + p[5:] // skip "/web/"
+		p = "web" + p[5:]
 	} else {
 		p = "web/index.html"
 	}
 
 	data, err := webFS.ReadFile(p)
 	if err != nil {
-		// try index.html for directory-like paths
 		if len(p) > 4 && !strings.HasSuffix(p, "/") {
 			data, err = webFS.ReadFile(p + "/index.html")
 		}
@@ -127,7 +178,6 @@ func (h *Handler) serveWebFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// simple mime detection
 	if strings.HasSuffix(p, ".html") {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	} else if strings.HasSuffix(p, ".js") {
@@ -183,13 +233,15 @@ func (h *Handler) handleWebChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, found := provider.DetectProvider(model)
+	// Get provider by type from config
+	providerType := config.ProviderTypeForModel(model)
+	p, found := provider.Get(providerType)
 	if !found {
-		http.Error(w, "no provider for model: "+model, http.StatusInternalServerError)
+		http.Error(w, "no provider for type: "+providerType, http.StatusInternalServerError)
 		return
 	}
 
-	// Build upstream request body (OpenAI format)
+	// Build upstream request body
 	upstreamBody := map[string]interface{}{
 		"model":    model,
 		"messages": messages,
@@ -223,7 +275,7 @@ func (h *Handler) handleWebChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := httpClient.Do(upstreamReq)
+	resp, err := h.httpClient.Do(upstreamReq)
 	if err != nil {
 		log.Printf("[web-chat] upstream error: %v", err)
 		http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
@@ -247,7 +299,6 @@ func (h *Handler) handleWebChat(w http.ResponseWriter, r *http.Request) {
 
 	flusher, _ := w.(http.Flusher)
 
-	// Read upstream SSE stream and relay to client
 	buf := make([]byte, 4096)
 	for {
 		n, err := resp.Body.Read(buf)
@@ -296,10 +347,11 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Detect provider type
-	p, found := provider.DetectProvider(model)
+	// Get provider by type from config (not by guessing)
+	providerType := config.ProviderTypeForModel(model)
+	p, found := provider.Get(providerType)
 	if !found {
-		http.Error(w, "no provider for model: "+model, http.StatusInternalServerError)
+		http.Error(w, "no provider for type: "+providerType, http.StatusInternalServerError)
 		return
 	}
 
@@ -334,7 +386,7 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Call upstream
-	resp, err := httpClient.Do(upstreamReq)
+	resp, err := h.httpClient.Do(upstreamReq)
 	if err != nil {
 		log.Printf("[proxy] upstream error: %v", err)
 		http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
@@ -343,14 +395,19 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	defer resp.Body.Close()
 
 	// Stream or buffered response
-	if isStreaming(r) {
+	if isStreamingRequest(r, body) {
 		h.handleStreaming(w, resp)
 	} else {
 		h.handleBuffered(w, resp)
 	}
 }
 
-func isStreaming(r *http.Request) bool {
+func isStreamingRequest(r *http.Request, body map[string]interface{}) bool {
+	// Check body stream field first (most SDKs set this)
+	if stream, ok := body["stream"].(bool); ok && stream {
+		return true
+	}
+	// Fallback to Accept header
 	ae := r.Header.Get("Accept")
 	return strings.Contains(ae, "text/event-stream") ||
 		strings.Contains(ae, "stream-json")
@@ -410,9 +467,9 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 			result := make([]map[string]string, 0, len(models))
 			for _, m := range models {
 				result = append(result, map[string]string{
-					"id":      m,
-					"object":  "model",
-					"created": "0",
+					"id":       m,
+					"object":   "model",
+					"created":  "0",
 					"owned_by": "unknown",
 				})
 			}

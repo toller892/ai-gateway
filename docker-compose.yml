@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  ai-gateway:
+    build: .
+    container_name: ai-gateway
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.yaml:/app/config/config.yaml:ro
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai

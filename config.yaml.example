@@ -1,8 +1,25 @@
 # AI Gateway 配置示例
 # 复制为 config.yaml 并填入真实 API Key
 
+# 服务端配置（可选）
+server:
+  # 入站鉴权 Token 列表（支持多个，Bearer 验证）
+  # 如果配置为空或省略，则不启用鉴权（仅本地开发）
+  auth_tokens:
+    - "sk-gateway-local"
+  
+  # 请求限制
+  max_body_size: 10485760  # 10MB（可选）
+  
+  # 超时设置（秒，可选）
+  timeouts:
+    connect: 10      # 连接上游超时
+    request: 300     # 完整请求超时
+
+# Provider 配置
 providers:
   openai:
+    type: openai  # 必填: openai | anthropic
     api_key: "your-openai-api-key"
     base_url: "https://api.openai.com/v1"
     models:
@@ -11,14 +28,15 @@ providers:
       - "gpt-3.5-turbo"
 
   anthropic:
+    type: anthropic  # 必填
     api_key: "your-anthropic-api-key"
     base_url: "https://api.anthropic.com"
     models:
       - "claude-sonnet-4-5"
       - "claude-opus-4-2"
-      - "claude-haiku-4"
 
   ollama:
+    type: openai  # Ollama 兼容 OpenAI 协议
     api_key: "ollama"
     base_url: "http://localhost:11434/v1"
     models:
@@ -26,6 +44,7 @@ providers:
       - "qwen2.5"
 
   siliconflow:
+    type: openai
     api_key: "your-siliconflow-api-key"
     base_url: "https://api.siliconflow.cn/v1"
     models:
@@ -33,11 +52,19 @@ providers:
 
   # 火山方舟（兼容 Anthropic 协议）
   ark:
+    type: anthropic
     api_key: "your-ark-api-key"
     base_url: "https://ark.cn-beijing.volces.com/api/coding/v1"
     models:
       - "doubao-seed-2.0-code"
       - "doubao-pro-32k"
-      - "doubao-lite-32k"
-      - "doubao-pro-128k"
-      - "doubao-seed-2.0"
+
+# 模型别名（可选）
+# 让 Agent 调用更简单的名称，如 "fast" → "gpt-4o-mini"
+aliases:
+  fast:
+    provider: openai
+    model: gpt-4o-mini
+  strong:
+    provider: anthropic
+    model: claude-sonnet-4-5

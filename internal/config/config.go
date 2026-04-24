@@ -9,15 +9,68 @@ import (
 
 // Config is the root config
 type Config struct {
-	Port      int                         `yaml:"port"`
-	Providers map[string]ProviderConfig   `yaml:"providers"`
+	Port int `yaml:"port"`
+	Server ServerConfig `yaml:"server"`
+	Providers map[string]ProviderConfig `yaml:"providers"`
 }
 
 // ProviderConfig is a simple provider config
 type ProviderConfig struct {
-	APIKey  string   `yaml:"api_key"`
-	BaseURL string   `yaml:"base_url"`
-	Models  []string `yaml:"models"`
+	Type string `yaml:"type"` // "openai" | "anthropic"
+	APIKey string `yaml:"api_key"`
+	BaseURL string `yaml:"base_url"`
+	Models []string `yaml:"models"`
+}
+
+// ServerConfig holds server-level settings
+type ServerConfig struct {
+	AuthTokens []string `yaml:"auth_tokens"`
+	MaxBodySize int64 `yaml:"max_body_size"`
+	Timeouts struct {
+		Connect int `yaml:"connect"`
+		Request int `yaml:"request"`
+	} `yaml:"timeouts"`
+}
+
+// AliasConfig allows model aliasing
+type AliasConfig struct {
+	Provider string `yaml:"provider"`
+	Model string `yaml:"model"`
+}
+
+// ModelAlias maps alias name -> real model info
+var modelAlias = make(map[string]AliasConfig)
+
+// ProviderTypeForModel returns the provider type for a model (openai/anthropic)
+func ProviderTypeForModel(model string) string {
+	// Check alias first
+	if alias, ok := modelAlias[model]; ok {
+		// Map alias to real model's provider type
+		if info, ok := GetModelInfo(alias.Model); ok {
+			return providerTypeFromName(info.ProviderName)
+		}
+		// Fallback: alias explicitly specifies provider
+		return alias.Provider
+	}
+
+	info, ok := GetModelInfo(model)
+	if !ok {
+		return "openai" // default
+	}
+	return providerTypeFromName(info.ProviderName)
+}
+
+func providerTypeFromName(providerName string) string {
+	if cfg, ok := GlobalConfig.Providers[providerName]; ok {
+		if cfg.Type != "" {
+			return cfg.Type
+		}
+	}
+	// Fallback: infer from provider name
+	if providerName == "anthropic" || providerName == "ark" {
+		return "anthropic"
+	}
+	return "openai"
 }
 
 // CustomProvider represents a single custom provider entry
@@ -119,12 +172,41 @@ func Load(path string) error {
 		for _, m := range p.Models {
 			modelMap[m] = ModelMap{
 				ProviderName: pName,
-				APIKey:       p.APIKey,
-				BaseURL:      p.BaseURL,
+				APIKey: p.APIKey,
+				BaseURL: p.BaseURL,
 			}
 		}
 	}
 
+	// Load aliases from "aliases" section if present
+	var aliases = make(map[string]AliasConfig)
+	if aliasesNode := findNodeByKey(root, "aliases"); aliasesNode != nil && aliasesNode.Kind == yaml.MappingNode {
+		for j := 0; j < len(aliasesNode.Content)-1; j += 2 {
+			k := aliasesNode.Content[j].Value
+			v := aliasesNode.Content[j+1]
+			var alias AliasConfig
+			if err := v.Decode(&alias); err == nil {
+				aliases[k] = alias
+			}
+		}
+	}
+	// Merge into modelAlias
+	for k, v := range aliases {
+		modelAlias[k] = v
+	}
+
+	return nil
+}
+
+// findNodeByKey searches for a key in a YAML mapping node
+func findNodeByKey(node *yaml.Node, key string) *yaml.Node {
+	if node.Kind == yaml.MappingNode && len(node.Content) > 1 {
+		for i := 0; i < len(node.Content)-1; i += 2 {
+			if node.Content[i].Value == key {
+				return node.Content[i+1]
+			}
+		}
+	}
 	return nil
 }
 
