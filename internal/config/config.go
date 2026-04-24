@@ -9,55 +9,151 @@ import (
 
 // Config is the root config
 type Config struct {
-	Port int `yaml:"port"`
-	Server ServerConfig `yaml:"server"`
-	Providers map[string]ProviderConfig `yaml:"providers"`
-}
-
-// ProviderConfig is a simple provider config
-type ProviderConfig struct {
-	Type string `yaml:"type"` // "openai" | "anthropic"
-	APIKey string `yaml:"api_key"`
-	BaseURL string `yaml:"base_url"`
-	Models []string `yaml:"models"`
+	Port      int                        `yaml:"port"`
+	Server    ServerConfig               `yaml:"server"`
+	Providers map[string]ProviderConfig  `yaml:"providers"`
+	Aliases   map[string]AliasConfig     `yaml:"aliases"`
 }
 
 // ServerConfig holds server-level settings
 type ServerConfig struct {
-	AuthTokens []string `yaml:"auth_tokens"`
-	MaxBodySize int64 `yaml:"max_body_size"`
-	Timeouts struct {
+	AuthTokens  []string `yaml:"auth_tokens"`
+	MaxBodySize int64    `yaml:"max_body_size"`
+	Timeouts    struct {
 		Connect int `yaml:"connect"`
 		Request int `yaml:"request"`
 	} `yaml:"timeouts"`
 }
 
+// ProviderConfig is a simple provider config
+type ProviderConfig struct {
+	Type    string   `yaml:"type"` // "openai" | "anthropic"
+	APIKey  string   `yaml:"api_key"`
+	BaseURL string   `yaml:"base_url"`
+	Models  []string `yaml:"models"`
+}
+
 // AliasConfig allows model aliasing
 type AliasConfig struct {
 	Provider string `yaml:"provider"`
-	Model string `yaml:"model"`
+	Model    string `yaml:"model"`
 }
 
-// ModelAlias maps alias name -> real model info
-var modelAlias = make(map[string]AliasConfig)
+// ModelMap maps model name -> provider info
+type ModelMap struct {
+	ProviderName string
+	APIKey       string
+	BaseURL      string
+}
 
-// ProviderTypeForModel returns the provider type for a model (openai/anthropic)
-func ProviderTypeForModel(model string) string {
-	// Check alias first
-	if alias, ok := modelAlias[model]; ok {
-		// Map alias to real model's provider type
-		if info, ok := GetModelInfo(alias.Model); ok {
-			return providerTypeFromName(info.ProviderName)
+// ResolvedModel contains full resolution info for a model request
+type ResolvedModel struct {
+	RequestedModel string // "fast" or "gpt-4o"
+	UpstreamModel  string // always the real model name
+	ProviderName   string
+	ProviderType   string
+	APIKey         string
+	BaseURL        string
+}
+
+// GlobalConfig holds the parsed config
+var GlobalConfig Config
+
+// modelMap caches model -> routing info
+var modelMap = make(map[string]ModelMap)
+
+// Load reads and parses config.yaml using standard yaml.Unmarshal
+func Load(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("parse yaml: %w", err)
+	}
+
+	GlobalConfig = cfg
+
+	// Build model lookup map
+	modelMap = make(map[string]ModelMap)
+	for pName, p := range cfg.Providers {
+		for _, m := range p.Models {
+			modelMap[m] = ModelMap{
+				ProviderName: pName,
+				APIKey:       p.APIKey,
+				BaseURL:      p.BaseURL,
+			}
 		}
-		// Fallback: alias explicitly specifies provider
-		return alias.Provider
 	}
 
-	info, ok := GetModelInfo(model)
-	if !ok {
-		return "openai" // default
+	// Validate aliases point to real models
+	for aliasName, alias := range cfg.Aliases {
+		if _, ok := modelMap[alias.Model]; !ok {
+			return fmt.Errorf("alias %q points to unknown model %q", aliasName, alias.Model)
+		}
 	}
-	return providerTypeFromName(info.ProviderName)
+
+	// Set defaults
+	if GlobalConfig.Server.MaxBodySize == 0 {
+		GlobalConfig.Server.MaxBodySize = 10 * 1024 * 1024 // 10MB
+	}
+	if GlobalConfig.Server.Timeouts.Connect == 0 {
+		GlobalConfig.Server.Timeouts.Connect = 10
+	}
+	if GlobalConfig.Server.Timeouts.Request == 0 {
+		GlobalConfig.Server.Timeouts.Request = 300
+	}
+
+	return nil
+}
+
+// ResolveModel resolves either an alias or direct model name to routing info
+func ResolveModel(model string) (ResolvedModel, bool) {
+	// Check alias first
+	if alias, ok := GlobalConfig.Aliases[model]; ok {
+		// Find the underlying model's provider info
+		info, ok := modelMap[alias.Model]
+		if !ok {
+			return ResolvedModel{}, false
+		}
+
+		// Determine provider type
+		providerType := providerTypeFromName(info.ProviderName)
+		// Allow alias to override provider type
+		if alias.Provider != "" {
+			if cfg, ok := GlobalConfig.Providers[alias.Provider]; ok && cfg.Type != "" {
+				providerType = cfg.Type
+			} else {
+				providerType = providerTypeFromName(alias.Provider)
+			}
+		}
+
+		return ResolvedModel{
+			RequestedModel: model,
+			UpstreamModel:  alias.Model,
+			ProviderName:   info.ProviderName,
+			ProviderType:   providerType,
+			APIKey:         info.APIKey,
+			BaseURL:        info.BaseURL,
+		}, true
+	}
+
+	// Direct model lookup
+	info, ok := modelMap[model]
+	if !ok {
+		return ResolvedModel{}, false
+	}
+
+	return ResolvedModel{
+		RequestedModel: model,
+		UpstreamModel:  model,
+		ProviderName:   info.ProviderName,
+		ProviderType:   providerTypeFromName(info.ProviderName),
+		APIKey:         info.APIKey,
+		BaseURL:        info.BaseURL,
+	}, true
 }
 
 func providerTypeFromName(providerName string) string {
@@ -73,144 +169,7 @@ func providerTypeFromName(providerName string) string {
 	return "openai"
 }
 
-// CustomProvider represents a single custom provider entry
-type CustomProvider struct {
-	Name    string   `yaml:"name"`
-	APIKey  string   `yaml:"api_key"`
-	BaseURL string   `yaml:"base_url"`
-	Models  []string `yaml:"models"`
-}
-
-// ModelMap maps model name → provider info
-type ModelMap struct {
-	ProviderName string
-	APIKey       string
-	BaseURL      string
-}
-
-// GlobalConfig holds the parsed config
-var GlobalConfig Config
-
-// modelMap caches model → routing info
-var modelMap = make(map[string]ModelMap)
-
-// Load reads and parses config.yaml
-func Load(path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read config: %w", err)
-	}
-
-	// Parse into yaml.Node tree for flexibility
-	var node yaml.Node
-	if err := yaml.Unmarshal(data, &node); err != nil {
-		return fmt.Errorf("parse yaml: %w", err)
-	}
-
-	// Navigate: node (Document) → root (Mapping) → "port", "providers"
-	if node.Kind != yaml.DocumentNode || len(node.Content) == 0 {
-		return fmt.Errorf("unexpected yaml root")
-	}
-	root := node.Content[0]
-	if root.Kind != yaml.MappingNode {
-		return fmt.Errorf("expected mapping at root")
-	}
-
-	var port int
-	providers := make(map[string]ProviderConfig)
-
-	for i := 0; i < len(root.Content)-1; i += 2 {
-		keyNode := root.Content[i]
-		valNode := root.Content[i+1]
-		key := keyNode.Value
-
-		switch key {
-		case "port":
-			if valNode.Kind == yaml.ScalarNode {
-				fmt.Sscanf(valNode.Value, "%d", &port)
-			}
-		case "providers":
-			if valNode.Kind != yaml.MappingNode {
-				return fmt.Errorf("providers must be a mapping")
-			}
-			for j := 0; j < len(valNode.Content)-1; j += 2 {
-				pKeyNode := valNode.Content[j]
-				pValNode := valNode.Content[j+1]
-				pName := pKeyNode.Value
-
-				if pValNode.Kind == yaml.SequenceNode {
-					// custom provider list
-					var customList []CustomProvider
-					if err := pValNode.Decode(&customList); err != nil {
-						return fmt.Errorf("decode custom provider %s: %w", pName, err)
-					}
-					for _, cp := range customList {
-						providers[cp.Name] = ProviderConfig{
-							APIKey:  cp.APIKey,
-							BaseURL: cp.BaseURL,
-							Models:  cp.Models,
-						}
-					}
-				} else if pValNode.Kind == yaml.MappingNode {
-					var pc ProviderConfig
-					if err := pValNode.Decode(&pc); err != nil {
-						return fmt.Errorf("decode provider %s: %w", pName, err)
-					}
-					providers[pName] = pc
-				}
-			}
-		}
-	}
-
-	GlobalConfig = Config{
-		Port:      port,
-		Providers: providers,
-	}
-
-	// Build model lookup map
-	for pName, p := range providers {
-		for _, m := range p.Models {
-			modelMap[m] = ModelMap{
-				ProviderName: pName,
-				APIKey: p.APIKey,
-				BaseURL: p.BaseURL,
-			}
-		}
-	}
-
-	// Load aliases from "aliases" section if present
-	var aliases = make(map[string]AliasConfig)
-	if aliasesNode := findNodeByKey(root, "aliases"); aliasesNode != nil && aliasesNode.Kind == yaml.MappingNode {
-		for j := 0; j < len(aliasesNode.Content)-1; j += 2 {
-			k := aliasesNode.Content[j].Value
-			v := aliasesNode.Content[j+1]
-			var alias AliasConfig
-			if err := v.Decode(&alias); err == nil {
-				aliases[k] = alias
-			}
-		}
-	}
-	// Merge into modelAlias
-	for k, v := range aliases {
-		modelAlias[k] = v
-	}
-
-	return nil
-}
-
-// findNodeByKey searches for a key in a YAML mapping node
-func findNodeByKey(node *yaml.Node, key string) *yaml.Node {
-	if node.Kind == yaml.MappingNode && len(node.Content) > 1 {
-		for i := 0; i < len(node.Content)-1; i += 2 {
-			if node.Content[i].Value == key {
-				return node.Content[i+1]
-			}
-		}
-	}
-	return nil
-}
-
-// GetModelInfo returns routing info for a model
+// GetModelInfo returns routing info for a model (deprecated: use ResolveModel)
 func GetModelInfo(model string) (ModelMap, bool) {
 	info, ok := modelMap[model]
 	return info, ok
@@ -241,4 +200,13 @@ func ListModelsDetailed() []ModelInfo {
 		})
 	}
 	return result
+}
+
+// ListAllModelIDs returns real models + aliases for model listing
+func ListAllModelIDs() []string {
+	models := ListModels()
+	for alias := range GlobalConfig.Aliases {
+		models = append(models, alias)
+	}
+	return models
 }

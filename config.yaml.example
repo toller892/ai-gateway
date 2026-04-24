@@ -1,25 +1,25 @@
 # AI Gateway 配置示例
 # 复制为 config.yaml 并填入真实 API Key
 
-# 服务端配置（可选）
+# 服务端配置（重要：这些配置必须生效，鉴权/超时才能工作）
 server:
-  # 入站鉴权 Token 列表（支持多个，Bearer 验证）
-  # 如果配置为空或省略，则不启用鉴权（仅本地开发）
+  # 入站鉴权 Token 列表（Bearer 验证）
+  # 为空则关闭鉴权（仅本地开发）
   auth_tokens:
     - "sk-gateway-local"
   
-  # 请求限制
-  max_body_size: 10485760  # 10MB（可选）
+  # 请求限制（默认 10MB）
+  max_body_size: 10485760
   
-  # 超时设置（秒，可选）
+  # 超时设置（秒）
   timeouts:
-    connect: 10      # 连接上游超时
-    request: 300     # 完整请求超时
+    connect: 10    # 连接上游超时
+    request: 300   # 非流式请求总超时
 
-# Provider 配置
+# Provider 配置（每个 provider 必须指定 type: openai | anthropic）
 providers:
   openai:
-    type: openai  # 必填: openai | anthropic
+    type: openai
     api_key: "your-openai-api-key"
     base_url: "https://api.openai.com/v1"
     models:
@@ -28,39 +28,31 @@ providers:
       - "gpt-3.5-turbo"
 
   anthropic:
-    type: anthropic  # 必填
+    type: anthropic
     api_key: "your-anthropic-api-key"
     base_url: "https://api.anthropic.com"
     models:
       - "claude-sonnet-4-5"
-      - "claude-opus-4-2"
 
+  # Ollama 本地模型
   ollama:
     type: openai  # Ollama 兼容 OpenAI 协议
     api_key: "ollama"
     base_url: "http://localhost:11434/v1"
     models:
-      - "llama3"
+      - "llama3.2"
       - "qwen2.5"
 
-  siliconflow:
-    type: openai
-    api_key: "your-siliconflow-api-key"
-    base_url: "https://api.siliconflow.cn/v1"
-    models:
-      - "Qwen/Qwen2.5-7B-Instruct"
-
   # 火山方舟（兼容 Anthropic 协议）
+  # ⚠️ 注意：base_url 不要以 /v1 结尾，代码会自动补全
   ark:
     type: anthropic
     api_key: "your-ark-api-key"
-    base_url: "https://ark.cn-beijing.volces.com/api/coding/v1"
+    base_url: "https://ark.cn-beijing.volces.com/api/coding"
     models:
-      - "doubao-seed-2.0-code"
-      - "doubao-pro-32k"
+      - "glm-5.1"
 
-# 模型别名（可选）
-# 让 Agent 调用更简单的名称，如 "fast" → "gpt-4o-mini"
+# 模型别名（下游 Agent 可用"fast"代替长模型名）
 aliases:
   fast:
     provider: openai

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -21,11 +22,7 @@ var webFS embed.FS
 
 // Request limiter based on server config
 func maxBodySize() int64 {
-	size := config.GlobalConfig.Server.MaxBodySize
-	if size == 0 {
-		return 10 * 1024 * 1024 // default 10MB
-	}
-	return size
+	return config.GlobalConfig.Server.MaxBodySize
 }
 
 // checkAuth validates Authorization header against server.auth_tokens
@@ -47,8 +44,8 @@ func checkAuth(r *http.Request) bool {
 	return false
 }
 
-// newHTTPClient creates a configured HTTP client with timeouts
-func newHTTPClient() *http.Client {
+// newHTTPClient creates a configured HTTP client with proper timeouts
+func newHTTPClient(streaming bool) *http.Client {
 	timeouts := config.GlobalConfig.Server.Timeouts
 	if timeouts.Connect == 0 {
 		timeouts.Connect = 10
@@ -56,27 +53,52 @@ func newHTTPClient() *http.Client {
 	if timeouts.Request == 0 {
 		timeouts.Request = 300
 	}
-	return &http.Client{
-		Transport: &http.Transport{
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 10,
-			IdleConnTimeout:     time.Duration(timeouts.Connect) * time.Second,
-			TLSClientConfig:     &tls.Config{MaxVersion: tls.VersionTLS12},
-		},
-		Timeout: time.Duration(timeouts.Request) * time.Second,
+
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   time.Duration(timeouts.Connect) * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
 	}
+
+	client := &http.Client{
+		Transport: transport,
+	}
+
+	// Only set total timeout for non-streaming requests
+	if !streaming {
+		client.Timeout = time.Duration(timeouts.Request) * time.Second
+	}
+
+	return client
+}
+
+// writeOpenAIError writes an OpenAI-style error response
+func writeOpenAIError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": map[string]interface{}{
+			"code":    code,
+			"message": message,
+			"type":    code,
+		},
+	})
 }
 
 // Handler proxies OpenAI-compatible requests to upstream providers
-type Handler struct {
-	httpClient *http.Client
-}
+type Handler struct{}
 
 // NewHandler creates a new proxy handler
 func NewHandler() *Handler {
-	return &Handler{
-		httpClient: newHTTPClient(),
-	}
+	return &Handler{}
 }
 
 // ServeHTTP handles all incoming requests
@@ -84,6 +106,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if err := recover(); err != nil {
 			log.Printf("[handler] panic recovered: %v", err)
+			writeOpenAIError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
 	}()
 
@@ -97,7 +120,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if path != "/health" && !strings.HasPrefix(path, "/web") {
 		if !checkAuth(r) {
 			w.Header().Set("WWW-Authenticate", `Bearer`)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeOpenAIError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid authorization")
 			return
 		}
 	}
@@ -114,19 +137,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "/v1/models":
 		h.handleModels(w, r)
 	case path == "/health":
-		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok"}`))
 	default:
-		http.Error(w, "not found", http.StatusNotFound)
+		writeOpenAIError(w, http.StatusNotFound, "not_found", "endpoint not found: "+path)
 	}
 }
 
-// ─── Web UI + Web API ─────────────────────────────────────────────────────────
-
+// handleWeb handles web UI and web API routes
 func (h *Handler) handleWeb(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
-	// /web-api/models → JSON model list with provider info
 	if path == "/web-api/models" {
 		models := config.ListModelsDetailed()
 		w.Header().Set("Content-Type", "application/json")
@@ -136,18 +157,16 @@ func (h *Handler) handleWeb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// /web-api/chat → SSE streaming chat
 	if path == "/web-api/chat" && r.Method == http.MethodPost {
 		h.handleWebChat(w, r)
 		return
 	}
 
-	// /web or /web/ → serve index.html
 	if path == "/web" || path == "/web/" {
 		h.serveWebFile(w, r)
 		return
 	}
-	// /web/* → static files
+
 	if strings.HasPrefix(path, "/web/") {
 		h.serveWebFile(w, r)
 		return
@@ -156,7 +175,6 @@ func (h *Handler) handleWeb(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "not found", http.StatusNotFound)
 }
 
-// serveWebFile serves files from the embedded webFS
 func (h *Handler) serveWebFile(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 	if p == "/web" || p == "/web/" {
@@ -188,7 +206,7 @@ func (h *Handler) serveWebFile(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-// handleWebChat — SSE streaming POST /web-api/chat
+// handleWebChat handles SSE streaming for web UI
 func (h *Handler) handleWebChat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -216,7 +234,7 @@ func (h *Handler) handleWebChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build OpenAI-compatible messages array
+	// Build messages array
 	messages := make([]map[string]string, 0, len(messagesRaw))
 	for _, m := range messagesRaw {
 		if mm, ok := m.(map[string]interface{}); ok {
@@ -226,24 +244,21 @@ func (h *Handler) handleWebChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Route to provider
-	info, ok := config.GetModelInfo(model)
+	// Resolve model (handles alias)
+	resolved, ok := config.ResolveModel(model)
 	if !ok {
 		http.Error(w, "model not found: "+model, http.StatusNotFound)
 		return
 	}
 
-	// Get provider by type from config
-	providerType := config.ProviderTypeForModel(model)
-	p, found := provider.Get(providerType)
+	p, found := provider.Get(resolved.ProviderType)
 	if !found {
-		http.Error(w, "no provider for type: "+providerType, http.StatusInternalServerError)
+		http.Error(w, "no provider for type: "+resolved.ProviderType, http.StatusInternalServerError)
 		return
 	}
 
-	// Build upstream request body
 	upstreamBody := map[string]interface{}{
-		"model":    model,
+		"model":    resolved.UpstreamModel,
 		"messages": messages,
 		"stream":   true,
 	}
@@ -255,9 +270,9 @@ func (h *Handler) handleWebChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstreamBodyBytes, _ := json.Marshal(upstreamBody)
-	upstreamURL := p.BuildURL(model, provider.ProviderInfo{
-		APIKey:  info.APIKey,
-		BaseURL: info.BaseURL,
+	upstreamURL := p.BuildURL(resolved.UpstreamModel, provider.ProviderInfo{
+		APIKey:  resolved.APIKey,
+		BaseURL: resolved.BaseURL,
 	})
 
 	upstreamReq, err := http.NewRequest(http.MethodPost, upstreamURL, bytes.NewReader(upstreamBodyBytes))
@@ -267,7 +282,7 @@ func (h *Handler) handleWebChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstreamReq.Header.Set("Content-Type", "application/json")
-	upstreamReq.Header.Set("X-Provider-APIKey", info.APIKey)
+	upstreamReq.Header.Set("X-Provider-APIKey", resolved.APIKey)
 
 	upstreamReq, err = p.BuildRequest(upstreamReq, upstreamBody)
 	if err != nil {
@@ -275,7 +290,8 @@ func (h *Handler) handleWebChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.httpClient.Do(upstreamReq)
+	httpClient := newHTTPClient(true)
+	resp, err := httpClient.Do(upstreamReq)
 	if err != nil {
 		log.Printf("[web-chat] upstream error: %v", err)
 		http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
@@ -290,7 +306,6 @@ func (h *Handler) handleWebChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// SSE streaming
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -312,90 +327,85 @@ func (h *Handler) handleWebChat(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ─── POST /v1/chat/completions ──────────────────────────────────────────────
-
+// handleChatCompletions handles /v1/chat/completions
 func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST required")
 		return
 	}
 
-	// Read body
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "failed to read body", http.StatusBadRequest)
+		writeOpenAIError(w, http.StatusBadRequest, "bad_request", "failed to read body")
 		return
 	}
 	defer r.Body.Close()
 
 	var body map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &body); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_json", "invalid json body")
 		return
 	}
 
 	model, ok := body["model"].(string)
 	if !ok || model == "" {
-		http.Error(w, "model is required", http.StatusBadRequest)
+		writeOpenAIError(w, http.StatusBadRequest, "missing_model", "model is required")
 		return
 	}
 
-	// Route to provider
-	info, ok := config.GetModelInfo(model)
+	// Resolve model (supports alias)
+	resolved, ok := config.ResolveModel(model)
 	if !ok {
-		http.Error(w, "model not found: "+model, http.StatusNotFound)
+		writeOpenAIError(w, http.StatusNotFound, "model_not_found", "model not found: "+model)
 		return
 	}
 
-	// Get provider by type from config (not by guessing)
-	providerType := config.ProviderTypeForModel(model)
-	p, found := provider.Get(providerType)
+	// Replace body model with upstream model name
+	body["model"] = resolved.UpstreamModel
+	bodyBytes, _ = json.Marshal(body)
+
+	p, found := provider.Get(resolved.ProviderType)
 	if !found {
-		http.Error(w, "no provider for type: "+providerType, http.StatusInternalServerError)
+		writeOpenAIError(w, http.StatusInternalServerError, "provider_not_found", "no provider for type: "+resolved.ProviderType)
 		return
 	}
 
-	// Build upstream URL
-	upstreamURL := p.BuildURL(model, provider.ProviderInfo{
-		APIKey:  info.APIKey,
-		BaseURL: info.BaseURL,
+	upstreamURL := p.BuildURL(resolved.UpstreamModel, provider.ProviderInfo{
+		APIKey:  resolved.APIKey,
+		BaseURL: resolved.BaseURL,
 	})
 
-	// Prepare upstream request
 	upstreamReq, err := http.NewRequest(http.MethodPost, upstreamURL, bytes.NewReader(bodyBytes))
 	if err != nil {
-		http.Error(w, "failed to create upstream request", http.StatusInternalServerError)
+		writeOpenAIError(w, http.StatusInternalServerError, "internal_error", "failed to create request")
 		return
 	}
 
-	// Copy headers
 	for k, v := range r.Header {
 		if k == "Content-Type" || k == "Authorization" {
 			upstreamReq.Header[k] = v
 		}
 	}
 
-	// Set provider API key header (used by BuildRequest)
-	upstreamReq.Header.Set("X-Provider-APIKey", info.APIKey)
+	upstreamReq.Header.Set("X-Provider-APIKey", resolved.APIKey)
 
-	// Let provider transform the request if needed
 	upstreamReq, err = p.BuildRequest(upstreamReq, body)
 	if err != nil {
-		http.Error(w, "failed to build request: "+err.Error(), http.StatusInternalServerError)
+		writeOpenAIError(w, http.StatusInternalServerError, "internal_error", "failed to build request: "+err.Error())
 		return
 	}
 
-	// Call upstream
-	resp, err := h.httpClient.Do(upstreamReq)
+	streaming := isStreamingRequest(r, body)
+	httpClient := newHTTPClient(streaming)
+	resp, err := httpClient.Do(upstreamReq)
 	if err != nil {
 		log.Printf("[proxy] upstream error: %v", err)
-		http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
 		return
 	}
 	defer resp.Body.Close()
 
-	// Stream or buffered response
-	if isStreamingRequest(r, body) {
+	if streaming {
 		h.handleStreaming(w, resp)
 	} else {
 		h.handleBuffered(w, resp)
@@ -403,11 +413,9 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 }
 
 func isStreamingRequest(r *http.Request, body map[string]interface{}) bool {
-	// Check body stream field first (most SDKs set this)
 	if stream, ok := body["stream"].(bool); ok && stream {
 		return true
 	}
-	// Fallback to Accept header
 	ae := r.Header.Get("Accept")
 	return strings.Contains(ae, "text/event-stream") ||
 		strings.Contains(ae, "stream-json")
@@ -416,7 +424,7 @@ func isStreamingRequest(r *http.Request, body map[string]interface{}) bool {
 func (h *Handler) handleBuffered(w http.ResponseWriter, resp *http.Response) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		http.Error(w, "failed to read upstream response", http.StatusBadGateway)
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "failed to read response")
 		return
 	}
 
@@ -456,10 +464,9 @@ func (h *Handler) handleStreaming(w http.ResponseWriter, resp *http.Response) {
 	}
 }
 
-// ─── GET /v1/models ─────────────────────────────────────────────────────────
-
+// handleModels returns all models including aliases
 func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
-	models := config.ListModels()
+	models := config.ListAllModelIDs()
 
 	response := map[string]interface{}{
 		"object": "list",

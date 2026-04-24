@@ -22,15 +22,18 @@
 cp config.yaml.example config.yaml
 # 编辑 config.yaml 填入真实 API Key
 
-# 2. 一键启动
+# 2. 本地构建镜像
 docker-compose up -d
 
-# 或 pull 镜像
+# 或手动构建
+docker build -t ai-gateway .
 docker run -d \
   -p 8080:8080 \
   -v ./config.yaml:/app/config/config.yaml:ro \
-  ghcr.io/toller892/ai-gateway:latest
+  ai-gateway
 ```
+
+> **Note**: GHCR 镜像 `ghcr.io/toller892/ai-gateway:latest` 将在 CI 配置完成后可用。
 
 ### 方式二：二进制
 

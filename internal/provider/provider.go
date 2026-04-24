@@ -59,6 +59,7 @@ func (o *OpenAIProvider) BuildRequest(r *http.Request, body map[string]interface
 	r.ContentLength = int64(len(payload))
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+r.Header.Get("X-Provider-APIKey"))
+	r.Header.Del("X-Provider-APIKey") // Clean up internal header
 	return r, nil
 }
 
@@ -122,6 +123,7 @@ func (a *AnthropicProvider) BuildRequest(r *http.Request, body map[string]interf
 	r.Header.Set("x-api-key", apiKey)
 	r.Header.Set("anthropic-version", "2023-06-01")
 	r.Header.Del("Authorization")
+	r.Header.Del("X-Provider-APIKey") // Clean up internal header
 	return r, nil
 }
 
