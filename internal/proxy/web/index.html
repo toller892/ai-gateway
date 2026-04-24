@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Gateway Console</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #0d1117;
+    --sidebar: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #7d8590;
+    --accent: #58a6ff;
+    --user-bg: #1f6feb22;
+    --user-border: #1f6feb;
+    --ai-bg: #21262d;
+    --input-bg: #161b22;
+  }
+
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', 'Fira Code', monospace; height: 100vh; display: flex; }
+
+  /* sidebar */
+  #sidebar { width: 260px; background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; }
+  #sidebar-header { padding: 16px; border-bottom: 1px solid var(--border); }
+  #sidebar-header h1 { font-size: 14px; font-weight: 600; color: var(--accent); }
+  #sidebar-header .subtitle { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  #sidebar-header .status { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--muted); }
+  #status-dot { width: 6px; height: 6px; border-radius: 50%; background: #f85149; }
+  #status-dot.ready { background: #3fb950; }
+
+  #model-list { flex: 1; overflow-y: auto; padding: 8px; }
+  #model-list .section-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; padding: 8px 8px 4px; }
+  .model-item { padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; display: flex; align-items: center; gap: 8px; transition: background .15s; }
+  .model-item:hover { background: #ffffff0a; }
+  .model-item.active { background: #58a6ff18; border: 1px solid #58a6ff44; }
+  .model-item .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+  .model-item.active .dot { background: var(--accent); }
+  .model-item .provider { font-size: 9px; color: var(--muted); margin-left: auto; }
+
+  #sidebar-footer { padding: 12px; border-top: 1px solid var(--border); font-size: 10px; color: var(--muted); }
+
+  /* chat area */
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+  #chat-header { padding: 12px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+  #chat-header .model-name { font-size: 13px; font-weight: 500; }
+  #chat-header .model-name span { color: var(--accent); }
+  #clear-btn { margin-left: auto; background: none; border: 1px solid var(--border); color: var(--muted); font-size: 11px; padding: 4px 10px; border-radius: 5px; cursor: pointer; font-family: inherit; transition: all .15s; }
+  #clear-btn:hover { color: var(--text); border-color: var(--muted); }
+
+  #messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+
+  .msg { max-width: 800px; width: 100%; margin: 0 auto; animation: fadeIn .2s ease; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  .msg.user { display: flex; flex-direction: column; align-items: flex-end; }
+  .msg.user .bubble { background: var(--user-bg); border: 1px solid var(--user-border); border-radius: 12px 12px 2px 12px; padding: 10px 14px; font-size: 13px; line-height: 1.5; max-width: 70%; word-break: break-word; }
+  .msg.ai .bubble { background: var(--ai-bg); border: 1px solid var(--border); border-radius: 12px 12px 12px 2px; padding: 10px 14px; font-size: 13px; line-height: 1.6; word-break: break-word; }
+
+  .msg.ai .bubble code { background: #00000044; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+  .msg.ai .bubble pre { background: #00000044; border-radius: 6px; padding: 10px 12px; margin: 6px 0; overflow-x: auto; }
+  .msg.ai .bubble pre code { background: none; padding: 0; }
+  .msg.ai .bubble .reasoning { display: block; color: var(--muted); font-size: 12px; line-height: 1.5; background: #ffffff08; border-radius: 6px; padding: 6px 10px; margin-bottom: 6px; }
+
+  .msg .meta { font-size: 10px; color: var(--muted); margin-top: 4px; }
+  .msg.user .meta { text-align: right; }
+
+  .typing { display: none; color: var(--muted); font-size: 12px; padding: 4px 0; }
+  .typing.active { display: block; }
+
+  /* input area */
+  #input-area { border-top: 1px solid var(--border); padding: 16px 20px; background: var(--input-bg); }
+  #input-row { display: flex; gap: 10px; max-width: 800px; margin: 0 auto; }
+  #msg-input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-family: inherit; font-size: 13px; padding: 10px 14px; resize: none; outline: none; min-height: 44px; max-height: 200px; transition: border-color .15s; }
+  #msg-input:focus { border-color: var(--accent); }
+  #msg-input::placeholder { color: var(--muted); }
+  #send-btn { background: var(--accent); border: none; color: #fff; font-family: inherit; font-size: 13px; font-weight: 500; padding: 0 18px; border-radius: 8px; cursor: pointer; transition: opacity .15s; white-space: nowrap; }
+  #send-btn:hover { opacity: .85; }
+  #send-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* welcome */
+  #welcome { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--muted); gap: 8px; }
+  #welcome .icon { font-size: 40px; margin-bottom: 8px; opacity: .4; }
+  #welcome p { font-size: 13px; }
+
+  /* scrollbar */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <div id="sidebar-header">
+    <h1>AI Gateway Console</h1>
+    <div class="subtitle">统一 API · 模型聚合</div>
+    <div class="status"><span id="status-dot"></span><span id="status-text">连接中...</span></div>
+  </div>
+  <div id="model-list">
+    <div class="section-label">选择模型</div>
+    <div id="models"></div>
+  </div>
+  <div id="sidebar-footer">
+    <div id="models-count">— 个模型</div>
+    <div style="margin-top:2px">AI Gateway v1.0</div>
+  </div>
+</div>
+
+<div id="main">
+  <div id="chat-header">
+    <div class="model-name">当前模型: <span id="current-model">未选择</span></div>
+    <button id="clear-btn" onclick="clearChat()">清空对话</button>
+  </div>
+
+  <div id="messages">
+    <div id="welcome">
+      <div class="icon">⚡</div>
+      <p>选择一个模型开始对话</p>
+    </div>
+  </div>
+
+  <div class="typing" id="typing-indicator">模型正在思考...</div>
+
+  <div id="input-area">
+    <div id="input-row">
+      <textarea id="msg-input" placeholder="输入消息... (Shift+Enter 换行，Enter 发送)" rows="1"></textarea>
+      <button id="send-btn" onclick="sendMessage()">发送</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API_BASE = '/web-api';
+let models = [];
+let selectedModel = null;
+let messages = [];
+let sending = false;
+
+const msgInput = document.getElementById('msg-input');
+const sendBtn = document.getElementById('send-btn');
+const messagesEl = document.getElementById('messages');
+const typingEl = document.getElementById('typing-indicator');
+const welcomeEl = document.getElementById('welcome');
+const modelsEl = document.getElementById('models');
+const statusDot = document.getElementById('status-dot');
+const statusText = document.getElementById('status-text');
+const modelsCountEl = document.getElementById('models-count');
+const currentModelEl = document.getElementById('current-model');
+
+// auto-resize textarea
+msgInput.addEventListener('input', () => {
+  msgInput.style.height = 'auto';
+  msgInput.style.height = Math.min(msgInput.scrollHeight, 200) + 'px';
+});
+
+// Enter to send, Shift+Enter for newline
+msgInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+async function loadModels() {
+  try {
+    const res = await fetch(`${API_BASE}/models`);
+    const data = await res.json();
+    models = data.models || [];
+    renderModels(models);
+    statusDot.classList.add('ready');
+    statusText.textContent = '已连接';
+    modelsCountEl.textContent = `${models.length} 个模型`;
+    if (models.length > 0) {
+      selectModel(models[0].id);
+    }
+  } catch (e) {
+    statusText.textContent = '连接失败';
+    console.error(e);
+  }
+}
+
+function renderModels(list) {
+  modelsEl.innerHTML = '';
+  list.forEach(m => {
+    const div = document.createElement('div');
+    div.className = 'model-item';
+    div.dataset.id = m.id;
+    div.innerHTML = `<span class="dot"></span><span>${m.id}</span><span class="provider">${m.provider || '—'}</span>`;
+    div.onclick = () => selectModel(m.id);
+    modelsEl.appendChild(div);
+  });
+}
+
+function selectModel(id) {
+  selectedModel = id;
+  currentModelEl.textContent = id;
+  document.querySelectorAll('.model-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.id === id);
+  });
+}
+
+function clearChat() {
+  messages = [];
+  messagesEl.innerHTML = '';
+  welcomeEl.style.display = 'flex';
+}
+
+function appendMsg(role, content, meta = '') {
+  welcomeEl.style.display = 'none';
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  div.innerHTML = `<div class="bubble">${escapeHtml(content)}</div>${meta ? `<div class="meta">${meta}</div>` : ''}`;
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return div;
+}
+
+function escapeHtml(text) {
+  if (!text) return '';
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML
+    .replace(/\n/g, '<br>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
+}
+
+async function sendMessage() {
+  const text = msgInput.value.trim();
+  if (!text || sending || !selectedModel) return;
+
+  sending = true;
+  sendBtn.disabled = true;
+  msgInput.value = '';
+  msgInput.style.height = 'auto';
+
+  appendMsg('user', text);
+  messages.push({ role: 'user', content: text });
+
+  typingEl.classList.add('active');
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+
+  try {
+    const res = await fetch(`${API_BASE}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: selectedModel, messages }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: { message: '请求失败' } }));
+      typingEl.classList.remove('active');
+      appendMsg('ai', `错误: ${err.error?.message || res.statusText}`);
+      messages.push({ role: 'assistant', content: `错误: ${err.error?.message || res.statusText}` });
+      return;
+    }
+
+    typingEl.classList.remove('active');
+
+      // streaming
+      if (res.headers.get('content-type')?.includes('text/event-stream')) {
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let done = false;
+        let reply = '';
+        let reasoning = '';
+
+        const aiDiv = appendMsg('ai', '');
+        const bubble = aiDiv.querySelector('.bubble');
+
+        while (!done) {
+          const { value, done: d } = await reader.read();
+          done = d;
+          if (value) {
+            const chunk = decoder.decode(value, { stream: true });
+            // Parse SSE: "data: {...}\n" lines
+            for (const line of chunk.split('\n')) {
+              const trimmed = line.trim();
+              if (!trimmed.startsWith('data:')) continue;
+              const jsonStr = trimmed.slice(5).trim();
+              if (jsonStr === '' || jsonStr === '[DONE]') continue;
+              try {
+                const data = JSON.parse(jsonStr);
+                const delta = data.choices?.[0]?.delta;
+                // GLM thinking mode: reasoning in reasoning_content, real reply in content
+                if (delta?.reasoning_content) reasoning += delta.reasoning_content;
+                if (delta?.content) reply += delta.content;
+              } catch {}
+            }
+            // Show reasoning collapsed above reply if present
+            const display = reasoning
+              ? `<span class="reasoning">🤔 ${escapeHtml(reasoning)}</span><br>${escapeHtml(reply)}`
+              : escapeHtml(reply);
+            bubble.innerHTML = display;
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+          }
+        }
+        messages.push({ role: 'assistant', content: reply });
+    } else {
+      // non-streaming
+      const data = await res.json();
+      const reply = data.choices?.[0]?.message?.content || '';
+      appendMsg('ai', reply);
+      messages.push({ role: 'assistant', content: reply });
+    }
+  } catch (e) {
+    typingEl.classList.remove('active');
+    appendMsg('ai', `网络错误: ${e.message}`);
+  } finally {
+    sending = false;
+    sendBtn.disabled = false;
+    msgInput.focus();
+  }
+}
+
+loadModels();
+</script>
+</body>
+</html>

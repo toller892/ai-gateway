@@ -1,0 +1,43 @@
+# AI Gateway 配置示例
+# 复制为 config.yaml 并填入真实 API Key
+
+providers:
+  openai:
+    api_key: "your-openai-api-key"
+    base_url: "https://api.openai.com/v1"
+    models:
+      - "gpt-4o"
+      - "gpt-4o-mini"
+      - "gpt-3.5-turbo"
+
+  anthropic:
+    api_key: "your-anthropic-api-key"
+    base_url: "https://api.anthropic.com"
+    models:
+      - "claude-sonnet-4-5"
+      - "claude-opus-4-2"
+      - "claude-haiku-4"
+
+  ollama:
+    api_key: "ollama"
+    base_url: "http://localhost:11434/v1"
+    models:
+      - "llama3"
+      - "qwen2.5"
+
+  siliconflow:
+    api_key: "your-siliconflow-api-key"
+    base_url: "https://api.siliconflow.cn/v1"
+    models:
+      - "Qwen/Qwen2.5-7B-Instruct"
+
+  # 火山方舟（兼容 Anthropic 协议）
+  ark:
+    api_key: "your-ark-api-key"
+    base_url: "https://ark.cn-beijing.volces.com/api/coding/v1"
+    models:
+      - "doubao-seed-2.0-code"
+      - "doubao-pro-32k"
+      - "doubao-lite-32k"
+      - "doubao-pro-128k"
+      - "doubao-seed-2.0"
