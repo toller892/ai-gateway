@@ -56,6 +56,7 @@ func (o *OpenAIProvider) BuildRequest(r *http.Request, body map[string]interface
 		return nil, err
 	}
 	r.Body = io.NopCloser(bytes.NewReader(payload))
+	r.ContentLength = int64(len(payload))
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+r.Header.Get("X-Provider-APIKey"))
 	return r, nil
@@ -116,6 +117,7 @@ func (a *AnthropicProvider) BuildRequest(r *http.Request, body map[string]interf
 	}
 
 	r.Body = io.NopCloser(bytes.NewReader(payload))
+	r.ContentLength = int64(len(payload))  // Fix Content-Length mismatch
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("x-api-key", apiKey)
 	r.Header.Set("anthropic-version", "2023-06-01")
